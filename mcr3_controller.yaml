@@ -3,7 +3,7 @@ substitutions:
   friendly_name: "Piec Gazowy + Kotłownia"
 
 external_components:
-  - source: github://arthurrump/esphome-opentherm
+  - source: custom_components/esphome-opentherm
     components: [opentherm]
 
 esphome:
