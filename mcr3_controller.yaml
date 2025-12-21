@@ -121,8 +121,6 @@ sensor:
     t_ret:
       name: "Return Temp"
       id: ret_temp
-    burner_starts:
-      name: "Burner Starts"
     burner_operation_hours:
       name: "Burner Hours"
     rel_mod_level:
