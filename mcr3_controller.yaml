@@ -156,9 +156,11 @@ binary_sensor:
               id: flame_text
               state: !lambda 'return x ? "Hot" : " No Flame";'
     ch_active:
-      name: "CH Pump Active"
+      name: "CH Pump"
+      device_class: running
     dhw_active:
-      name: "DHW Pump Active"
+      name: "DHW Pump"
+      device_class: running
     flame_fault:
       name: "Fault"
       device_class: problem
