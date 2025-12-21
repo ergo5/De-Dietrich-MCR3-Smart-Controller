@@ -124,11 +124,11 @@ sensor:
     burner_operation_hours:
       name: "Burner Hours"
     rel_mod_level:
-      name: "Modulation"
+      name: "Modulation (approx)"
       unit_of_measurement: "%"
       filters:
         - lambda: |-
-            if (id(flame_binary).state && x < 1.0) return 1.0;
+            if (id(flame_binary).state && x < 1.0) return 5.0;
             return x;
     t_dhw:
       name: "DHW Temp"
