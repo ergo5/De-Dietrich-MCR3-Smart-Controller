@@ -121,8 +121,6 @@ sensor:
     t_ret:
       name: "Return Temp"
       id: ret_temp
-    t_storage:
-      name: "Boiler Internal Temp"
     burner_starts:
       name: "Burner Starts"
     burner_operation_hours:
@@ -143,8 +141,8 @@ sensor:
     update_interval: 60s
     entity_category: "diagnostic"
   - platform: uptime
-    name: "System Uptime"
-    entity_category: "diagnostic"
+    id: uptime_seconds
+    internal: true
 
 # ---------------------------------------------------------
 # 5. BINARY SENSORS
@@ -254,7 +252,23 @@ text_sensor:
   - platform: template
     name: "Flame Status"
     id: flame_text
-    icon: "mdi:fire"
+  - platform: template
+    name: "System Uptime"
+    icon: "mdi:clock-outline"
+    entity_category: "diagnostic"
+    lambda: |-
+      int seconds = (int)id(uptime_seconds).state;
+      int days = seconds / (24 * 3600);
+      seconds = seconds % (24 * 3600);
+      int hours = seconds / 3600;
+      seconds = seconds % 3600;
+      int minutes = seconds / 60;
+      return {
+        (days ? to_string(days) + "d " : "") +
+        (hours ? to_string(hours) + "h " : "") +
+        to_string(minutes) + "m"
+      };
+    update_interval: 60s
 
 button:
   - platform: restart
