@@ -62,8 +62,12 @@ class OpenthermHub : public Component {
 protected:
     // Communication pins for the OpenTherm interface
     int in_pin, out_pin;
+
+public:
     // The OpenTherm interface from @ihormelnyk's library
     OpenTherm* ot;
+
+protected:
 
     // Use macros to create fields for every entity specified in the ESPHome configuration
     #define OPENTHERM_DECLARE_SENSOR(entity) sensor::Sensor* entity;
