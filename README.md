@@ -55,6 +55,7 @@ Once flashed and connected, the device will appear in Home Assistant via the ESP
 This configuration is based on the [esphome-opentherm](https://github.com/arthurrump/esphome-opentherm) component. Feel free to fork and improve!
 
 ## 📚 Resources
+*   **[OpenTherm Protocol v2.2 Notes](docs/PROTOCOL_NOTES.md)** - extracted Data-ID Overview Map.
 *   **[What is OpenTherm?](https://www.opentherm.eu/opentherm-protocol/what-is-opentherm/)** - Official protocol documentation explaining the standard used by this project.
 
 ---
