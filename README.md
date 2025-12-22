@@ -54,5 +54,8 @@ Once flashed and connected, the device will appear in Home Assistant via the ESP
 
 This configuration is based on the [esphome-opentherm](https://github.com/arthurrump/esphome-opentherm) component. Feel free to fork and improve!
 
+## 📚 Resources
+*   **[What is OpenTherm?](https://www.opentherm.eu/opentherm-protocol/what-is-opentherm/)** - Official protocol documentation explaining the standard used by this project.
+
 ---
 *Disclaimer: Use at your own risk. Modifying heating equipment can be dangerous. Verified on De Dietrich MCR3, but should work with Remeha Tzerra/Baxi with minimal changes.*
