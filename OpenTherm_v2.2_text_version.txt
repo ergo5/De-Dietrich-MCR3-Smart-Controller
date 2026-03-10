@@ -1,0 +1,246 @@
+
+OpenTherm Protocol Specification v2.2 (2003) — TEXT VERSION FOR LLM INGESTION
+
+SOURCE: OpenTherm™ Protocol Specification v2.2, 7 February 2003
+NOTE: This file is a text-only transformation of the original PDF.
+Diagrams and charts are replaced with explicit textual descriptions.
+
+====================================================================
+1. INTRODUCTION
+====================================================================
+
+OpenTherm is a point-to-point digital communication protocol between a Room Unit (master) and a Boiler Unit (slave)
+for HVAC control. It supports both digital (OT/+) and simplified analogue/PWM (OT/-) operation.
+
+Key characteristics:
+- Two-wire, polarity-free connection.
+- Power and data over the same pair.
+- Manchester encoding at 1000 bps nominal.
+- Mandatory minimum data objects for interoperability.
+- Backward compatibility with “dumb” boilers.
+
+OT/+ = full digital protocol.
+OT/- = Lite mode (PWM-based), physically compatible.
+
+====================================================================
+2. SYSTEM OVERVIEW
+====================================================================
+
+Architecture:
+Room Controller (Master) <—— OpenTherm line ——> Boiler (Slave)
+
+Only one master and one slave per line (no bus).
+
+OT/+ vs OT/- detection:
+On power-up, master tries OT/+ for up to 20 seconds.
+If no valid reply, it switches to OT/-.
+
+Figure replacement:
+[STATE DIAGRAM]
+TRYING OT/+ -> (valid response) -> OT/+ MODE
+TRYING OT/+ -> (no response 20s) -> OT/- MODE
+OT/+ MODE -> (no valid response 1 min) -> COMMUNICATION FAULT
+
+====================================================================
+3. PHYSICAL LAYER
+====================================================================
+
+Medium:
+- 2 wires, untwisted pair recommended.
+- Max length: 50 m
+- Max resistance: 2 x 5 ohm
+- Polarity-free
+
+Transmission principle:
+- Boiler -> Room: current modulation
+- Room -> Boiler: voltage modulation
+- Idle state: low current, low voltage
+
+3.2.1 Boiler to Room (current signalling):
+- Low: 5–9 mA (idle)
+- High: 17–23 mA
+- Receiver threshold: ~13 mA
+- Rise/fall time: max 50 µs
+
+3.2.2 Room to Boiler (voltage signalling):
+- Low: max 7 V (idle)
+- High: 15–18 V
+- Receiver threshold: ~11 V
+- Rise/fall time: max 50 µs
+
+Power feeding:
+- Boiler supplies at least 5 mA.
+- Typical achievable internal supply: ~3.3 V.
+
+Bit encoding:
+- Manchester (bi-phase L)
+- '1' = active-to-idle transition
+- '0' = idle-to-active transition
+- Bit rate: 1000 bps nominal
+- Mid-bit transition every ~1 ms.
+
+Short-circuit feature:
+If the terminals are shorted for 5–15 seconds with no valid frames,
+the boiler must interpret this as a heat demand.
+
+====================================================================
+4. DATA LINK LAYER (OT/+)
+====================================================================
+
+Frame:
+Start bit (1) + 32-bit frame + Stop bit (1)
+
+Frame structure:
+P | MSG(3) | SPARE(4) | DATA-ID(8) | DATA-VALUE(16)
+
+Parity: even parity over 32 bits.
+
+Message types:
+
+Master -> Slave:
+000 READ-DATA
+001 WRITE-DATA
+010 INVALID-DATA
+
+Slave -> Master:
+100 READ-ACK
+101 WRITE-ACK
+110 DATA-INVALID
+111 UNKNOWN-DATAID
+
+Conversation rules:
+- Master always initiates.
+- Slave replies in 20–800 ms.
+- Minimum gap between conversations: 100 ms.
+- Master must transmit at least once per second.
+
+====================================================================
+5. APPLICATION LAYER (OT/+)
+====================================================================
+
+Data-ID ranges:
+0–127 : Standard OpenTherm
+128–255 : Manufacturer test/diagnostics
+
+Data classes:
+1. Control and Status
+2. Configuration
+3. Remote Commands
+4. Sensors and Info
+5. Remote Boiler Parameters
+6. Transparent Slave Parameters
+7. Fault History
+8. Special Applications
+
+Data formats:
+u8, s8, u16, s16, f8.8 fixed-point
+
+Example f8.8:
+21.5°C = 0x1580
+
+--------------------------------------------------------------------
+5.2 Mandatory IDs
+--------------------------------------------------------------------
+
+ID 0  Status flags
+ID 1  Control setpoint (CH water temp)
+ID 3  Slave configuration flags
+ID 14 Max relative modulation level
+ID 17 Relative modulation level
+ID 25 Boiler water temperature
+
+--------------------------------------------------------------------
+5.3.1 Class 1 — Control & Status
+--------------------------------------------------------------------
+
+ID 0:
+Master status bits:
+- CH enable
+- DHW enable
+- Cooling enable
+- OTC active
+- CH2 enable
+
+Slave status bits:
+- Fault
+- CH active
+- DHW active
+- Flame on
+- Cooling active
+- CH2 active
+- Diagnostic event
+
+ID 1:
+Control setpoint, f8.8, 0–100°C
+
+ID 5:
+Application-specific fault flags + OEM fault code
+
+--------------------------------------------------------------------
+5.3.2 Class 2 — Configuration
+--------------------------------------------------------------------
+
+ID 2 Master configuration + MemberID
+ID 3 Slave configuration + MemberID
+ID 124 OpenTherm version (master)
+ID 125 OpenTherm version (slave)
+ID 126/127 Product type & version
+
+--------------------------------------------------------------------
+5.3.3 Class 3 — Remote Commands
+--------------------------------------------------------------------
+
+ID 4:
+Command codes:
+1 = Boiler Lockout Reset
+2 = CH Water Filling
+
+--------------------------------------------------------------------
+5.3.4 Class 4 — Sensors & Information
+--------------------------------------------------------------------
+
+Examples:
+ID 16 Room setpoint
+ID 17 Relative modulation level
+ID 18 CH pressure
+ID 20 Day/time
+ID 21 Date
+ID 22 Year
+ID 25 Boiler water temp
+ID 27 Outside temperature
+ID 30 Solar collector temperature
+ID 33 Exhaust temperature
+ID 116–123 Operation hours and start counters
+
+--------------------------------------------------------------------
+5.3.5 Class 5 — Remote Boiler Parameters
+--------------------------------------------------------------------
+
+Includes:
+- DHW setpoint bounds
+- Max CH setpoint bounds
+- Remote writable boiler parameters
+
+--------------------------------------------------------------------
+5.3.6 Class 6 — Transparent Slave Parameters
+--------------------------------------------------------------------
+
+ID 10 Number of TSPs
+ID 11 Read/write arbitrary indexed slave parameters
+
+--------------------------------------------------------------------
+5.3.7 Class 7 — Fault History
+--------------------------------------------------------------------
+
+ID 12 Fault buffer size
+ID 13 Fault buffer entries
+
+--------------------------------------------------------------------
+5.3.8 Class 8 — Special Applications
+--------------------------------------------------------------------
+
+Cooling control, sequencer control, and special extensions.
+
+====================================================================
+END OF TEXT VERSION
+====================================================================

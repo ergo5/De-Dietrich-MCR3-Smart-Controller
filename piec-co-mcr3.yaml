@@ -1,0 +1,483 @@
+# =============================================================================
+# MCR3 OpenTherm Controller v5.4.0
+# De Dietrich MCR3 Smart Controller
+# https://github.com/ergo5/De-Dietrich-MCR3-Smart-Controller
+#
+# Hardware: Wemos D1 Mini (ESP-12F) + Ihor Melnyk OpenTherm Shield
+# Features: Hybrid A/B Control, Software Heating Curve, Efficiency Monitoring
+# =============================================================================
+
+substitutions:
+  devicename: "piec-co-mcr3"
+  friendly_name: "MCR3"
+
+esphome:
+  name: ${devicename}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: 600
+    then:
+      - lambda: "id(boot_count) += 1;"
+      - logger.log:
+          format: "Boot #%d — restore_from_flash active"
+          args: ["id(boot_count)"]
+      - delay: 15s # DS18B20 needs ~11s (window_size=15 × ~750ms)
+      - if:
+          condition:
+            lambda: "return id(software_mode) && !std::isnan(id(outdoor_temp).state);"
+          then:
+            - logger.log: "Boot: Software mode restored, recalculating heating curve"
+            - lambda: "id(control_mode).publish_state(true);"
+            - script.execute: calc_heating_curve
+          else:
+            - if:
+                condition:
+                  lambda: "return id(software_mode);"
+                then:
+                  - logger.log:
+                      level: WARN
+                      format: "Boot: DS18B20 still NaN after 15s — waiting for on_value trigger"
+
+esp8266:
+  board: d1_mini
+  restore_from_flash: true
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  min_auth_mode: WPA2
+
+  # Uncomment and adjust for static IP
+  # manual_ip:
+  #   static_ip: 192.168.1.100
+  #   gateway: 192.168.1.1
+  #   subnet: 255.255.255.0
+
+  ap:
+    ssid: "MCR3-Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+web_server:
+  port: 80
+
+logger:
+  level: INFO
+  baud_rate: 0
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ---------------------------------------------------------
+# Hardware Configuration
+# ---------------------------------------------------------
+opentherm:
+  in_pin: D2 # GPIO4
+  out_pin: D1 # GPIO5
+
+one_wire:
+  - platform: gpio
+    pin: D5
+    id: dallas_hub
+
+# ---------------------------------------------------------
+# Global Variables
+# ---------------------------------------------------------
+globals:
+  - id: software_mode
+    type: bool
+    initial_value: "false"
+    restore_value: true
+
+  - id: kominek_override_state
+    type: bool
+    initial_value: "false"
+    restore_value: true
+
+  - id: boot_count
+    type: int
+    initial_value: "0"
+    restore_value: true
+
+  - id: flame_cycles
+    type: int
+    initial_value: "0"
+    restore_value: false
+
+# ---------------------------------------------------------
+# Software Heating Curve (Mode B only)
+# Formula: T_water = 20 + Slope × (20 - T_outdoor) + Offset
+# Includes Kominek Override: when fireplace >35°C, use low setpoint
+# ---------------------------------------------------------
+script:
+  - id: calc_heating_curve
+    then:
+      - lambda: |-
+          if (!id(software_mode)) {
+            ESP_LOGD("curve", "Autonomous mode - skipping calculation");
+            return;
+          }
+
+          // Kominek Override Logic
+          static bool was_kominek_override = false;
+          if (id(kominek_override_enable).state) {
+            float kominek = id(kominek_temp).state;
+            float kominek_setpoint = id(kominek_override_setpoint).state;
+            
+            if (!std::isnan(kominek)) {
+              // Hysteresis: ON > 35°C, OFF < 30°C
+              if (kominek > 35.0) {
+                id(kominek_override_state) = true;
+              } else if (kominek < 30.0) {
+                id(kominek_override_state) = false;
+              }
+              
+              if (id(kominek_override_state)) {
+                was_kominek_override = true;
+                ESP_LOGI("curve", "KOMINEK OVERRIDE: %.1fC -> setpoint=%.0fC", kominek, kominek_setpoint);
+                id(ch_setpoint).make_call().set_value(kominek_setpoint).perform();
+                return;
+              }
+            }
+          }
+
+          // Normal heating curve calculation
+          float slope = id(heating_curve_slope).state;
+          float offset = id(heating_curve_offset).state;
+          float outdoor = id(outdoor_temp).state;
+
+          if (std::isnan(outdoor)) {
+             ESP_LOGW("curve", "DS18B20 FAILURE! Switching to Autonomous mode.");
+             id(software_mode) = false;
+             id(control_mode).publish_state(false);
+             return;
+          }
+
+          float target = 20.0 + slope * (20.0 - outdoor) + offset;
+
+          // Safety limits
+          if (target < 25.0) target = 25.0;
+          if (target > 75.0) target = 75.0;
+
+          // EMA smoothing (alpha=0.3) — prevents oscillations
+          static float smoothed_target = target;
+          if (was_kominek_override) {
+            // Reset EMA after override exit — prevent stale jump
+            smoothed_target = target;
+            was_kominek_override = false;
+            ESP_LOGI("curve", "EMA reset after Kominek Override exit");
+          }
+          smoothed_target = 0.3 * target + 0.7 * smoothed_target;
+
+          // Defensive clamp after EMA
+          if (smoothed_target < 25.0) smoothed_target = 25.0;
+          if (smoothed_target > 75.0) smoothed_target = 75.0;
+
+          ESP_LOGI("curve", "Setpoint: %.1fC (raw=%.1fC, Outdoor: %.1fC, Slope: %.1f)", smoothed_target, target, outdoor, slope);
+          id(ch_setpoint).make_call().set_value(smoothed_target).perform();
+
+# ---------------------------------------------------------
+# Sensors
+# ---------------------------------------------------------
+sensor:
+  # Kominek temperature from Home Assistant
+  - platform: homeassistant
+    id: kominek_temp
+    entity_id: sensor.kominek_czujnik_temperature
+    name: "Kominek Temp"
+    unit_of_measurement: "°C"
+    icon: "mdi:fireplace"
+
+  # DS18B20 - External Temperature (for Software mode)
+  - platform: dallas_temp
+    one_wire_id: dallas_hub
+    index: 0
+    name: "Outdoor Temp (DS18B20)"
+    id: outdoor_temp
+    filters:
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 15
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: "return id(software_mode);"
+            then:
+              - script.execute: calc_heating_curve
+
+  # Delta T (Efficiency Indicator)
+  - platform: template
+    name: "Delta T"
+    id: delta_t
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer-lines"
+    accuracy_decimals: 1
+    lambda: |-
+      if (id(boiler_temp).state > 0 && id(ret_temp).state > 0) {
+        return id(boiler_temp).state - id(ret_temp).state;
+      }
+      return 0;
+    update_interval: 30s
+
+  # OpenTherm Sensors
+  - platform: opentherm
+    t_boiler:
+      name: "Boiler Temp"
+      id: boiler_temp
+      accuracy_decimals: 1
+      filters:
+        - throttle: 30s
+        - delta: 0.5
+    t_ret:
+      name: "Return Temp"
+      id: ret_temp
+      accuracy_decimals: 1
+      filters:
+        - throttle: 30s
+        - delta: 0.5
+    t_outside:
+      name: "Outdoor Temp (Boiler)"
+      id: boiler_outdoor_temp
+      accuracy_decimals: 1
+      filters:
+        - throttle: 60s
+        - delta: 0.5
+    rel_mod_level:
+      name: "Modulation"
+      unit_of_measurement: "%"
+      accuracy_decimals: 0
+      filters:
+        # MCR3 reports 0% even when flame is on - add minimum 5%
+        - lambda: |-
+            if (id(flame_binary).state && x < 1.0) return 5.0;
+            return x;
+        - delta: 1.0
+        - throttle: 10s
+    t_dhw:
+      name: "DHW Temp"
+      accuracy_decimals: 1
+      filters:
+        - throttle: 30s
+        - delta: 0.5
+    burner_operation_hours:
+      name: "Burner Hours"
+
+  # Diagnostics
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_sensor
+    entity_category: "diagnostic"
+    internal: true
+
+  - platform: template
+    name: "Boot Count"
+    lambda: "return id(boot_count);"
+    accuracy_decimals: 0
+    entity_category: "diagnostic"
+    icon: "mdi:counter"
+    update_interval: 60s
+
+  - platform: template
+    name: "Flame Cycles"
+    lambda: "return id(flame_cycles);"
+    accuracy_decimals: 0
+    entity_category: "diagnostic"
+    icon: "mdi:fire-alert"
+    update_interval: 60s
+
+# ---------------------------------------------------------
+# Binary Sensors
+# ---------------------------------------------------------
+binary_sensor:
+  # Kominek Override Status
+  - platform: template
+    name: "Kominek Override Active"
+    id: kominek_override_active
+    icon: "mdi:fireplace"
+    lambda: "return id(kominek_override_state);"
+
+  - platform: opentherm
+    flame_on:
+      id: flame_binary
+      name: "Flame"
+      on_press:
+        - lambda: "id(flame_cycles) += 1;"
+    ch_active:
+      name: "CH Pump"
+      device_class: running
+    dhw_active:
+      name: "DHW Pump"
+      device_class: running
+    fault_indication:
+      name: "Fault"
+      device_class: problem
+      filters:
+        - delayed_on: 5s
+
+# ---------------------------------------------------------
+# Numbers (Controls)
+# ---------------------------------------------------------
+number:
+  # Heating Curve Parameters (Mode B)
+  - platform: template
+    name: "Heating Curve Slope"
+    id: heating_curve_slope
+    min_value: 0.1
+    max_value: 4.0
+    step: 0.1
+    initial_value: 0.8
+    mode: slider
+    optimistic: true
+    restore_value: true
+    icon: "mdi:chart-bell-curve"
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: "return id(software_mode);"
+            then:
+              - script.execute: calc_heating_curve
+
+  - platform: template
+    name: "Heating Curve Offset"
+    id: heating_curve_offset
+    min_value: -20
+    max_value: 20
+    step: 1
+    initial_value: 0
+    mode: box
+    optimistic: true
+    restore_value: true
+    icon: "mdi:thermometer-plus"
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: "return id(software_mode);"
+            then:
+              - script.execute: calc_heating_curve
+
+  # Kominek Override Setpoint
+  - platform: template
+    name: "Kominek Override Setpoint"
+    id: kominek_override_setpoint
+    min_value: 25
+    max_value: 40
+    step: 1
+    initial_value: 30
+    mode: box
+    optimistic: true
+    restore_value: true
+    unit_of_measurement: "°C"
+    icon: "mdi:fireplace"
+
+  # OpenTherm Setpoints
+  - platform: opentherm
+    t_set:
+      id: ch_setpoint
+      name: "CH Setpoint"
+      min_value: 20
+      max_value: 80
+      step: 1
+      mode: box
+      initial_value: 40
+      restore_value: true
+    t_dhw_set:
+      name: "DHW Setpoint"
+      min_value: 30
+      max_value: 60
+      step: 1
+      mode: box
+      initial_value: 45
+      restore_value: true
+    max_rel_mod_level:
+      name: "Max Burner Power"
+      min_value: 0
+      max_value: 100
+      step: 5
+      initial_value: 100
+      restore_value: true
+      icon: "mdi:speedometer"
+
+# ---------------------------------------------------------
+# Switches
+# ---------------------------------------------------------
+switch:
+  # Mode Switch: OFF=Autonomous (A), ON=Software (B)
+  - platform: template
+    name: "Software Mode"
+    id: control_mode
+    icon: "mdi:toggle-switch"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: "id(software_mode) = true;"
+      - logger.log: "Switched to SOFTWARE mode"
+      - script.execute: calc_heating_curve
+    turn_off_action:
+      - lambda: "id(software_mode) = false;"
+      - logger.log: "Switched to AUTONOMOUS mode"
+
+  # Kominek Override Enable
+  - platform: template
+    name: "Kominek Override Enable"
+    id: kominek_override_enable
+    icon: "mdi:fireplace"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  # CH/DHW Enable
+  - platform: opentherm
+    ch_enable:
+      name: "CH Enable"
+      restore_mode: RESTORE_DEFAULT_ON
+    dhw_enable:
+      name: "DHW Enable"
+      restore_mode: RESTORE_DEFAULT_ON
+
+# ---------------------------------------------------------
+# Text Sensors
+# ---------------------------------------------------------
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+    entity_category: "diagnostic"
+
+  - platform: template
+    name: "Uptime Readable"
+    icon: "mdi:clock-outline"
+    entity_category: "diagnostic"
+    lambda: |-
+      int seconds = (int)id(uptime_sensor).state;
+      int days = seconds / (24 * 3600);
+      seconds = seconds % (24 * 3600);
+      int hours = seconds / 3600;
+      seconds = seconds % 3600;
+      int minutes = seconds / 60;
+      return {
+        (days ? to_string(days) + "d " : "") +
+        (hours ? to_string(hours) + "h " : "") +
+        to_string(minutes) + "m"
+      };
+    update_interval: 60s
+
+# ---------------------------------------------------------
+# Buttons
+# ---------------------------------------------------------
+button:
+  - platform: restart
+    name: "Restart"
+    entity_category: "config"
+    icon: "mdi:restart"

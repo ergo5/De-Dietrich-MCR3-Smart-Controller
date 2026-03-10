@@ -1,0 +1,121 @@
+# =============================================================================
+# MCR3 Remote UART Bridge
+# WiFi-to-Serial bridge for De Dietrich MCR3 diagnostic port
+# Connect to MCR3 "PC" port (RJ9 4P4C) for Recom software access
+#
+# Hardware: Wemos D1 Mini + Logic Level Converter (5V TTL ↔ 3.3V)
+# =============================================================================
+
+substitutions:
+  devicename: "mcr3-uart-bridge"
+  friendly_name: "MCR3 UART Bridge"
+
+esphome:
+  name: ${devicename}
+  friendly_name: ${friendly_name}
+
+esp8266:
+  board: esp01_1m # ESP-01S with 1MB flash
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Uncomment for static IP
+  # manual_ip:
+  #   static_ip: 192.168.1.101
+  #   gateway: 192.168.1.1
+  #   subnet: 255.255.255.0
+
+  ap:
+    ssid: "MCR3-UART-Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+logger:
+  level: DEBUG
+  baud_rate: 0 # Disable logging on hardware UART
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ---------------------------------------------------------
+# UART Configuration for MCR3 "PC" Port
+# ---------------------------------------------------------
+# MCR3 PC port pinout (RJ9 4P4C):
+#   Pin 1: VCC (+5V) - DO NOT connect to Wemos!
+#   Pin 2: TX (MCR3 → Wemos RX)
+#   Pin 3: RX (Wemos TX → MCR3)
+#   Pin 4: GND
+#
+# IMPORTANT: MCR3 uses 5V TTL logic!
+# Use a logic level converter (5V ↔ 3.3V) between MCR3 and Wemos
+# ---------------------------------------------------------
+
+uart:
+  id: mcr3_uart
+  tx_pin: GPIO1 # Hardware TX (default UART)
+  rx_pin: GPIO3 # Hardware RX (default UART)
+  baud_rate: 9600 # Try 9600, 19200, or 38400 if no response
+  # debug:
+  #   direction: BOTH
+  #   dummy_receiver: false
+  #   after:
+  #     delimiter: "\n"
+  #   sequence:
+  #     - lambda: UARTDebug::log_hex(direction, bytes, ':');
+
+# ---------------------------------------------------------
+# Stream Server - TCP to UART Bridge
+# Allows connecting via TCP socket (e.g., PuTTY, Recom via COM port emulator)
+# ---------------------------------------------------------
+external_components:
+  - source: github://oxan/esphome-stream-server
+
+stream_server:
+  uart_id: mcr3_uart
+  port: 6638 # Connect to this port via TCP
+
+# ---------------------------------------------------------
+# Web Server for status
+# ---------------------------------------------------------
+web_server:
+  port: 80
+
+# ---------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+  - platform: uptime
+    name: "Uptime"
+    entity_category: "diagnostic"
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: "diagnostic"
+
+  - platform: version
+    name: "ESPHome Version"
+    entity_category: "diagnostic"
+
+binary_sensor:
+  - platform: status
+    name: "Status"
+
+button:
+  - platform: restart
+    name: "Restart"
+    entity_category: "config"

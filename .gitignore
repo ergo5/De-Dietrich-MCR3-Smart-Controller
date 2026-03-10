@@ -1,0 +1,28 @@
+# Secrets and local config
+secrets.yaml
+
+# ESPHome build artifacts
+.esphome/
+.pioenvs/
+.piolibdeps/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs_*.txt
+
+# Large files
+*.pdf
+
+# Python venv
+.venv/
+
+# Agent files
+.agent/
