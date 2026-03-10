@@ -1,0 +1,281 @@
+substitutions:
+  devicename: "piec-co-mcr3"
+  friendly_name: "Piec Gazowy + Kotłownia"
+
+external_components:
+  - source: custom_components/esphome-opentherm
+    components: [opentherm]
+
+esphome:
+  name: ${devicename}
+  friendly_name: ${friendly_name}
+  project:
+    name: "admin.mcr3_controller"
+    version: "2.0.0"
+
+esp8266:
+  board: d1_mini_pro
+
+wifi:
+  ssid: "YOUR_WIFI_SSID"
+  password: "YOUR_WIFI_PASSWORD"
+  min_auth_mode: WPA2
+  ap:
+    ssid: "MCR3-Recovery"
+    password: "YOUR_AP_PASSWORD"
+
+logger:
+  level: INFO
+  baud_rate: 0
+
+api:
+
+ota:
+  - platform: esphome
+    password: "YOUR_OTA_PASSWORD"
+
+# ---------------------------------------------------------
+# 1. PHYSICAL SENSORS (ONE_WIRE)
+# ---------------------------------------------------------
+one_wire:
+  - platform: gpio
+    pin: D5
+    id: dallas_hub
+
+# ---------------------------------------------------------
+# 2. OPENTHERM COMMUNICATION
+# ---------------------------------------------------------
+opentherm:
+  in_pin: D2 # (GPIO4)
+  out_pin: D1 # (GPIO5)
+
+# ---------------------------------------------------------
+# 3. HEATING CURVE LOGIC (SOFTWARE)
+# ---------------------------------------------------------
+script:
+  - id: calc_heating_curve
+    then:
+      - lambda: |-
+          // Formula: T_water = 20 + Slope * (20 - T_outdoor) + Offset
+          float slope = id(heating_curve_slope).state;
+          float offset = id(heating_curve_offset).state;
+          float outdoor = id(outdoor_temp).state;
+
+          if (std::isnan(outdoor)) {
+             ESP_LOGW("curve", "No outdoor reading! Fallback to safe 30°C.");
+             id(boiler_t_set).make_call().set_value(30.0).perform();
+             return;
+          }
+
+          float target = 20.0 + slope * (20.0 - outdoor) + offset;
+
+          // Safety limits (min 25, max 80)
+          if (target < 25.0) target = 25.0;
+          if (target > 80.0) target = 80.0;
+
+          ESP_LOGI("curve", "Calc: %.1f (Out: %.1f, Slope: %.1f, Offset: %.1f)", target, outdoor, slope, offset);
+          id(boiler_t_set).make_call().set_value(target).perform();
+
+# ---------------------------------------------------------
+# 4. SENSORS
+# ---------------------------------------------------------
+sensor:
+  # --- Dallas Sensors ---
+  - platform: dallas_temp
+    one_wire_id: dallas_hub
+    index: 1
+    name: "Outdoor Temperature"
+    id: outdoor_temp
+    filters:
+      - sliding_window_moving_average:
+          window_size: 15
+          send_every: 15
+    on_value:
+      then:
+        - script.execute: calc_heating_curve
+
+  - platform: dallas_temp
+    one_wire_id: dallas_hub
+    index: 0
+    name: "Boiler Room Temperature"
+    id: boiler_room_temp
+
+  # --- Delta T (Efficiency) ---
+  - platform: template
+    name: "Delta T"
+    id: delta_t
+    unit_of_measurement: "°C"
+    icon: "mdi:thermometer-lines"
+    lambda: |-
+      if (id(boiler_temp).state > 0 && id(ret_temp).state > 0) {
+        return id(boiler_temp).state - id(ret_temp).state;
+      }
+      return 0;
+    update_interval: 5s
+
+  # --- OpenTherm Data ---
+  - platform: opentherm
+    t_boiler:
+      name: "CH Water Temp"
+      id: boiler_temp
+    t_ret:
+      name: "Return Temp"
+      id: ret_temp
+    burner_operation_hours:
+      name: "Burner Hours"
+    rel_mod_level:
+      name: "Modulation (approx)"
+      unit_of_measurement: "%"
+      filters:
+        - lambda: |-
+            if (id(flame_binary).state && x < 1.0) return 5.0;
+            return x;
+    t_dhw:
+      name: "DHW Temp"
+
+  # --- System Sensors (Diagnostic) ---
+  - platform: wifi_signal
+    name: "WiFi Strength"
+    update_interval: 60s
+    entity_category: "diagnostic"
+  - platform: uptime
+    id: uptime_seconds
+    internal: true
+
+# ---------------------------------------------------------
+# 5. BINARY SENSORS
+# ---------------------------------------------------------
+binary_sensor:
+  - platform: opentherm
+    flame_on:
+      id: flame_binary
+      internal: true
+      on_state:
+        then:
+          - text_sensor.template.publish:
+              id: flame_text
+              state: !lambda 'return x ? "Hot" : " No Flame";'
+    ch_active:
+      name: "CH Pump"
+      device_class: running
+    dhw_active:
+      name: "DHW Pump"
+      device_class: running
+    flame_fault:
+      name: "Fault"
+      device_class: problem
+      filters:
+        - delayed_on: 5s
+      on_press:
+        then:
+          - homeassistant.service:
+              service: persistent_notification.create
+              data:
+                title: "⚠️ MCR3 BOILER FAULT"
+                message: "The boiler reported a fault (flame_fault). Check the display!"
+                notification_id: "mcr3_fault_alert"
+
+# ---------------------------------------------------------
+# 6. CONTROLS
+# ---------------------------------------------------------
+number:
+  # Heating Curve Sliders
+  - platform: template
+    name: "Heating Curve Slope"
+    id: heating_curve_slope
+    min_value: 0.1
+    max_value: 4.0
+    step: 0.1
+    initial_value: 1.4
+    mode: slider
+    optimistic: true
+    restore_value: true
+    icon: "mdi:chart-bell-curve"
+    on_value:
+      then:
+        - script.execute: calc_heating_curve
+
+  - platform: template
+    name: "Heating Curve Offset"
+    id: heating_curve_offset
+    min_value: -20
+    max_value: 20
+    step: 1
+    initial_value: 0
+    mode: box
+    optimistic: true
+    restore_value: true
+    icon: "mdi:thermometer-plus"
+    on_value:
+      then:
+        - script.execute: calc_heating_curve
+
+  # Native OpenTherm Numbers
+  - platform: opentherm
+    t_set:
+      id: boiler_t_set
+      name: "CH Setpoint"
+      min_value: 20
+      max_value: 80
+      step: 1
+      mode: box
+    t_dhw_set:
+      name: "DHW Setpoint"
+      min_value: 30
+      max_value: 60
+      step: 1
+      mode: box
+      restore_value: true
+      initial_value: 45
+    max_rel_mod_level:
+      name: "Max Burner Power"
+      min_value: 0
+      max_value: 100
+      step: 1
+      mode: box
+      initial_value: 100
+      restore_value: true
+      icon: "mdi:speedometer"
+
+# ---------------------------------------------------------
+# 7. SWITCHES
+# ---------------------------------------------------------
+switch:
+  - platform: opentherm
+    ch_enable:
+      name: "CH Enable"
+      restore_mode: RESTORE_DEFAULT_ON
+    dhw_enable:
+      name: "DHW Enable"
+      restore_mode: RESTORE_DEFAULT_ON
+
+# ---------------------------------------------------------
+# 8. TEXT SENSORS
+# ---------------------------------------------------------
+text_sensor:
+  - platform: template
+    name: "Flame Status"
+    id: flame_text
+  - platform: template
+    name: "System Uptime"
+    icon: "mdi:clock-outline"
+    entity_category: "diagnostic"
+    lambda: |-
+      int seconds = (int)id(uptime_seconds).state;
+      int days = seconds / (24 * 3600);
+      seconds = seconds % (24 * 3600);
+      int hours = seconds / 3600;
+      seconds = seconds % 3600;
+      int minutes = seconds / 60;
+      return {
+        (days ? to_string(days) + "d " : "") +
+        (hours ? to_string(hours) + "h " : "") +
+        to_string(minutes) + "m"
+      };
+    update_interval: 60s
+
+button:
+  - platform: restart
+    name: "Restart Controller"
+    entity_category: "config"
+    icon: "mdi:restart"

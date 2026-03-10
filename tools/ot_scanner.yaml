@@ -1,0 +1,97 @@
+substitutions:
+  name: "mcr3-scanner"
+  friendly_name: "MCR3 OpenTherm Scanner"
+
+esphome:
+  name: "${name}"
+  platform: ESP8266
+  board: d1_mini
+
+# Enable logging
+logger:
+  level: INFO
+  baud_rate: 0
+
+# Enable Home Assistant API
+api:
+
+ota:
+
+wifi:
+  ssid: "!secret wifi_ssid"
+  password: "!secret wifi_password"
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "MCR3 Scanner Output"
+    password: ""
+
+captive_portal:
+
+# Import local OpenTherm component with exposed 'ot' pointer
+external_components:
+  - source: ../custom_components
+
+opentherm:
+  id: ot_hub
+  in_pin: D2 # GPIO4
+  out_pin: D1 # GPIO5
+
+globals:
+  - id: current_scan_id
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+script:
+  - id: run_full_scan
+    then:
+      - logger.log: "Starting OpenTherm ID Scan (0-127)..."
+      - globals.set:
+          id: current_scan_id
+          value: "0"
+      - while:
+          condition:
+            lambda: "return id(current_scan_id) < 128;"
+          then:
+            - lambda: |-
+                // Built the request: Read-Data, ID = current_scan_id, Value = 0
+                // Using the exposed 'ot' public pointer from our modified hub.h
+                unsigned long request = id(ot_hub).ot->buildRequest(
+                  OpenThermRequestType::READ_DATA, 
+                  (OpenThermMessageID)id(current_scan_id), 
+                  0
+                );
+
+                // Send and wait for response (blocks for ~1s)
+                unsigned long response = id(ot_hub).ot->sendRequest(request);
+
+                if (id(ot_hub).ot->isValidResponse(response)) {
+                    // Extract message type to check for Unknown/Invalid
+                    OpenThermMessageType msg_type = id(ot_hub).ot->getMessageType(response);
+                    
+                    if (msg_type == OpenThermMessageType::READ_ACK) {
+                        uint16_t data = id(ot_hub).ot->getUInt(response);
+                        float f_data = id(ot_hub).ot->getFloat(response);
+                        ESP_LOGI("SCANNER", "[FOUND] ID %3d: Supported! (Data: %u / %.2f)", id(current_scan_id), data, f_data);
+                    } else if (msg_type == OpenThermMessageType::UNKNOWN_DATA_ID) {
+                        ESP_LOGD("SCANNER", "[SKIP]  ID %3d: Unknown Data ID", id(current_scan_id));
+                    } else if (msg_type == OpenThermMessageType::DATA_INVALID) {
+                        ESP_LOGW("SCANNER", "[WARN]  ID %3d: Data Invalid (Supported but value error?)", id(current_scan_id));
+                    } else {
+                         ESP_LOGW("SCANNER", "[INFO]  ID %3d: Other response type: %d", id(current_scan_id), (int)msg_type);
+                    }
+                } else {
+                    ESP_LOGE("SCANNER", "[ERR]   ID %3d: Timeout / Invalid Frame", id(current_scan_id));
+                }
+            - globals.set:
+                id: current_scan_id
+                value: !lambda "return id(current_scan_id) + 1;"
+            - delay: 200ms
+      - logger.log: "Scan Complete!"
+
+button:
+  - platform: template
+    name: "Start Scan"
+    on_press:
+      - script.execute: run_full_scan
